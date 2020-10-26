@@ -1,0 +1,126 @@
+---
+- name: Patch and reboot servers
+  hosts: all
+  tasks:
+  - name: upgrade packages via dnf
+    dnf: name=* state=latest
+    become: true
+    register: dnfcommandout
+  - name: Print errors if dnf failed
+    debug:
+      msg: dnf command produced errors
+    when: dnfcommandout is not defined
+  - name: check to see if we need a reboot
+    command: needs-restarting -r
+    register: result
+    ignore_errors: yes
+  - name: display result
+    debug:
+      var: result.rc
+  - name: Reboot Server if Necessary
+    become: true
+    reboot:
+    when: result.rc == 1
+
+- name: Install required packages
+  hosts: all
+  tasks:
+    - name: Install attr and gzip
+      become: true
+      dnf:
+        name:
+          - attr
+          - gzip
+        state: present
+
+- name: Verify NTP
+  hosts: all
+  tasks:
+    - name: ensure chrony (ntp service) is at the latest version
+      dnf: name=chrony state=latest
+      notify:
+      - restart chronyd
+      become: true
+  handlers:
+    - name: restart chronyd
+      service: name=chronyd state=restarted
+      become: true
+
+- name: Verify fapolicyd
+  hosts: all
+  tasks:
+    - name: ensure that fapolicyd is at the latest version
+      dnf: name=fapolicyd state=latest
+      notify:
+      - restart fapolicyd
+      become: true
+  handlers:
+    - name: restart fapolicyd
+      service: name=fapolicyd state=restarted
+      become: true
+
+- name: Create admin user 'aac' with password 'Password1!'
+  hosts: all
+  tasks:
+    - name: Create 'aac' user
+      become: true
+      user:
+        name: aac
+        password: "{{ 'Password1!' | password_hash('sha512') }}"
+        update_password: on_create
+        shell: /bin/bash
+        groups: wheel
+        append: yes
+      register: aac
+    - name: Force 'aac' user to change password
+      become: true
+      shell: chage -d 0 aac
+      when: aac.changed
+
+- name: Configure Grub for IMA - Labels
+  hosts: all
+  tasks:
+    - name: Copy a version of grub that is dependent on the OS. setype obtained by doing ls -Z /etc/default/grub on original file
+      become: true
+      vars:
+        kernel_opts: "ima_policy=tcb ima_appraise_tcb ima_appraise=fix ima_hash=sha256"
+      template:
+          src: templates/{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.grub.j2
+          dest: /etc/default/grub
+          owner: root
+          group: root
+          mode: 0644
+          backup: yes
+          setype: bootloader_etc_t
+    - name: Rebuild the bootloader
+      become: true
+      command: /sbin/grub2-mkconfig -o /boot/grub2/grub.cfg
+    - name: Reboot with updated IMA bootloader paramaters
+      become: true
+      reboot:
+    - name: Apply IMA labels... this takes a few minutes
+      become: true
+      command: find / -fstype xfs -type f -uid 0 -exec dd if='{}' of=/dev/null count=0 status=none \;
+      ignore_errors: yes
+
+- name: Configure Grub for IMA - Enforce
+  hosts: all
+  tasks:
+    - name: Copy a version of grub that is dependent on the OS. setype obtained by doing ls -Z /etc/default/grub on original file
+      become: true
+      vars:
+        kernel_opts: "ima_policy=tcb ima_appraise_tcb ima_appraise=enforce ima_hash=sha256"
+      template:
+          src: templates/{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.grub.j2
+          dest: /etc/default/grub
+          owner: root
+          group: root
+          mode: 0644
+          backup: yes
+          setype: bootloader_etc_t
+    - name: Rebuild the bootloader
+      become: true
+      command: /sbin/grub2-mkconfig -o /boot/grub2/grub.cfg
+    - name: Reboot with updated IMA bootloader paramaters
+      become: true
+      reboot:
